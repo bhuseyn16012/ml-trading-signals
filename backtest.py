@@ -1,15 +1,16 @@
 """
 backtest.py — Strategy Backtesting Engine
 
-Simulates trading META using the model's buy/sell signals and calculates
+Simulates trading using the model's buy/sell signals and calculates
 professional financial performance metrics.
 
 Strategy logic:
     - Model predicts BUY (1) → we are invested (capture that day's return)
     - Model predicts SELL (0) → we are in cash (0% return)
 
-Benchmark:
-    - Buy-and-hold META for the entire period
+Includes:
+    - Transaction cost modeling (10bps per trade)
+    - Comparison against buy-and-hold benchmark
 
 Usage:
     from backtest import run_backtest
@@ -23,6 +24,7 @@ import numpy as np
 def run_backtest(
     predictions_df: pd.DataFrame,
     initial_capital: float = 100_000,
+    transaction_cost_bps: float = 10.0,
 ) -> tuple:
     """
     Backtest the model's signals against buy-and-hold.
@@ -34,6 +36,9 @@ def run_backtest(
         Must have columns: Date, Close, Actual, Predicted, Probability.
     initial_capital : float
         Starting portfolio value (default: $100,000).
+    transaction_cost_bps : float
+        Cost per trade in basis points (default: 10 = 0.1%).
+        Applied each time the model switches position (BUY→SELL or SELL→BUY).
 
     Returns
     -------
@@ -42,27 +47,33 @@ def run_backtest(
         - equity_df: daily equity curve for plotting
     """
     df = predictions_df.copy()
+    tc_rate = transaction_cost_bps / 10_000  # Convert bps to decimal
 
     # --- Calculate daily returns ---
     df["Daily_Return"] = df["Close"].pct_change()
 
-    # --- Strategy returns: only invested on BUY days ---
-    # If model says BUY (1), we capture that day's return
-    # If model says SELL (0), we're in cash (0% return)
-    df["Strategy_Return"] = df["Daily_Return"] * df["Predicted"]
+    # --- Detect position changes (trades) ---
+    # A trade occurs when the signal changes from 0→1 or 1→0
+    df["Position_Change"] = df["Predicted"].diff().abs().fillna(0)
+    total_trades = int(df["Position_Change"].sum())
 
-    # --- Benchmark returns: buy and hold the entire time ---
+    # --- Strategy returns with transaction costs ---
+    # On BUY days: capture the return minus any transaction cost
+    # On SELL days: 0% return (in cash), minus transaction cost if we just sold
+    df["Trade_Cost"] = df["Position_Change"] * tc_rate
+    df["Strategy_Return"] = (df["Daily_Return"] * df["Predicted"]) - df["Trade_Cost"]
+
+    # --- Benchmark returns: buy and hold (no costs after initial purchase) ---
     df["Benchmark_Return"] = df["Daily_Return"]
 
     # Drop the first row (no return to calculate)
     df = df.iloc[1:].copy()
 
     # --- Build equity curves ---
-    # Cumulative product of (1 + daily return) gives growth of $1
     df["Strategy_Equity"] = initial_capital * (1 + df["Strategy_Return"]).cumprod()
     df["Benchmark_Equity"] = initial_capital * (1 + df["Benchmark_Return"]).cumprod()
 
-    # --- Calculate metrics for both strategy and benchmark ---
+    # --- Calculate metrics ---
     strategy_metrics = _calculate_metrics(
         df["Strategy_Return"], df["Strategy_Equity"], "ML Strategy"
     )
@@ -74,25 +85,26 @@ def run_backtest(
     trading_days = df["Predicted"].sum()
     total_days = len(df)
 
-    # Win rate: of the days we traded, how many were profitable?
     traded_returns = df.loc[df["Predicted"] == 1, "Daily_Return"]
     win_rate = (traded_returns > 0).mean() if len(traded_returns) > 0 else 0
 
-    # Profit factor: gross profits / gross losses
     gross_profits = traded_returns[traded_returns > 0].sum()
     gross_losses = abs(traded_returns[traded_returns < 0].sum())
     profit_factor = gross_profits / gross_losses if gross_losses > 0 else np.inf
 
+    total_cost = df["Trade_Cost"].sum() * initial_capital
     strategy_metrics.update({
         "Trading Days": int(trading_days),
         "Total Days": int(total_days),
         "Exposure (%)": trading_days / total_days * 100,
         "Win Rate (%)": win_rate * 100,
         "Profit Factor": profit_factor,
+        "Total Trades": total_trades,
+        "Transaction Costs ($)": total_cost,
     })
 
     # --- Print summary ---
-    _print_summary(strategy_metrics, benchmark_metrics)
+    _print_summary(strategy_metrics, benchmark_metrics, transaction_cost_bps)
 
     # --- Prepare equity DataFrame for plotting ---
     equity_df = df[["Date", "Strategy_Equity", "Benchmark_Equity",
@@ -108,19 +120,6 @@ def _calculate_metrics(
 ) -> dict:
     """
     Calculate standard financial performance metrics.
-
-    Parameters
-    ----------
-    returns : pd.Series
-        Daily returns.
-    equity : pd.Series
-        Daily portfolio value.
-    name : str
-        Label for this strategy.
-
-    Returns
-    -------
-    dict of metric_name: value
     """
     total_return = (equity.iloc[-1] / equity.iloc[0] - 1) * 100
 
@@ -130,13 +129,12 @@ def _calculate_metrics(
     annualized_return = ((1 + total_return / 100) ** (1 / n_years) - 1) * 100
 
     # Sharpe Ratio: annualized (return / risk)
-    # Risk-free rate assumed to be 0 for simplicity
     if returns.std() > 0:
         sharpe = (returns.mean() / returns.std()) * np.sqrt(252)
     else:
         sharpe = 0
 
-    # Maximum Drawdown: worst peak-to-trough decline
+    # Maximum Drawdown
     cumulative_max = equity.cummax()
     drawdown = (equity - cumulative_max) / cumulative_max
     max_drawdown = drawdown.min() * 100
@@ -155,11 +153,13 @@ def _calculate_metrics(
     }
 
 
-def _print_summary(strategy: dict, benchmark: dict) -> None:
+def _print_summary(strategy: dict, benchmark: dict,
+                    transaction_cost_bps: float) -> None:
     """Print a formatted comparison of strategy vs benchmark."""
 
     print("\n" + "=" * 65)
     print("                    BACKTEST RESULTS")
+    print(f"          (Transaction costs: {transaction_cost_bps:.0f} bps per trade)")
     print("=" * 65)
 
     print(f"\n{'Metric':<28} {'ML Strategy':>16} {'Buy & Hold':>16}")
@@ -181,11 +181,13 @@ def _print_summary(strategy: dict, benchmark: dict) -> None:
 
     print("-" * 65)
     print(f"\n  Strategy-specific:")
-    print(f"    Trading Days:  {strategy['Trading Days']:,} / "
+    print(f"    Trading Days:     {strategy['Trading Days']:,} / "
           f"{strategy['Total Days']:,} "
           f"({strategy['Exposure (%)']:.1f}% exposure)")
-    print(f"    Win Rate:      {strategy['Win Rate (%)']:.1f}%")
-    print(f"    Profit Factor: {strategy['Profit Factor']:.2f}")
+    print(f"    Win Rate:         {strategy['Win Rate (%)']:.1f}%")
+    print(f"    Profit Factor:    {strategy['Profit Factor']:.2f}")
+    print(f"    Total Trades:     {strategy['Total Trades']:,}")
+    print(f"    Transaction Costs: ${strategy['Transaction Costs ($)']:,.2f}")
     print("=" * 65)
 
 
