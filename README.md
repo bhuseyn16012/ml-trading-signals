@@ -1,4 +1,4 @@
-# 📈 ML Trading Signal Generator
+# ML Trading Signal Generator
 
 An end-to-end machine learning pipeline that generates buy/sell signals using XGBoost and technical indicator features, validated with walk-forward backtesting to prevent look-ahead bias. The project compares strategy performance across multiple tickers (META, SPY) and confidence thresholds (50%, 60%), with transaction cost modeling for realistic performance estimates.
 
