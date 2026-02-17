@@ -1,4 +1,4 @@
-# 📈 ML Trading Signal Generator
+# ML Trading Signal Generator
 
 An end-to-end machine learning pipeline that generates buy/sell signals for META (Meta Platforms) using XGBoost and technical indicator features, validated with walk-forward backtesting to prevent look-ahead bias.
 
@@ -96,7 +96,7 @@ ml-trading-signals/
 ### Setup
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/ml-trading-signals.git
+git clone https://github.com/bhuseyn16012/ml-trading-signals.git
 cd ml-trading-signals
 
 # Install dependencies
